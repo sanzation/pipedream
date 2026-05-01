@@ -3,6 +3,50 @@ import obolus from "../app/obolus.app.mjs";
 
 const PERSON_ADVANCED_FIELDS = [
   {
+    prop: "standardGermanEmployee",
+    apiKey: "standard_german_employee",
+    type: "boolean",
+    label: "German Standard Employee",
+    description: "Preferred Obolus alias for German payroll. Use `true` for a normal German employee with statutory pension, unemployment, health, and care insurance. This avoids the legacy inverted-looking 0/1 insurance flags.",
+    default: true,
+    countries: ["DE"],
+  },
+  {
+    prop: "dePensionInsurance",
+    apiKey: "de_pension_insurance",
+    type: "string",
+    label: "German Pension Insurance",
+    description: "Preferred Obolus alias for German pension/unemployment handling. Use `statutory` for a normal employee; use `exempt` only for civil servants, self-employed, or other no-statutory-pension cases.",
+    options: [
+      "statutory",
+      "exempt",
+    ],
+    default: "statutory",
+    countries: ["DE"],
+  },
+  {
+    prop: "deHealthInsurance",
+    apiKey: "de_health_insurance",
+    type: "string",
+    label: "German Health Insurance",
+    description: "Preferred Obolus alias for German health/care insurance. Use `statutory` for public GKV/PV; use `private` only for PKV cases.",
+    options: [
+      "statutory",
+      "private",
+    ],
+    default: "statutory",
+    countries: ["DE"],
+  },
+  {
+    prop: "deHealthExtraContributionPercent",
+    apiKey: "de_health_extra_contribution_percent",
+    type: "number",
+    label: "German Health Extra Contribution %",
+    description: "Preferred Obolus alias for the German statutory health insurance Zusatzbeitrag. Enter the literal percent, e.g. `2.5` for 2.5%. Do not enter `25`, `250`, basis points, or cents.",
+    default: 2.5,
+    countries: ["DE"],
+  },
+  {
     prop: "bundesland",
     apiKey: "Bundesland",
     type: "string",
@@ -20,8 +64,9 @@ const PERSON_ADVANCED_FIELDS = [
     prop: "kvz",
     apiKey: "KVZ",
     type: "number",
-    label: "KVZ",
-    description: "Raw Obolus API field `KVZ` for the health insurance supplemental rate.",
+    label: "Legacy KVZ",
+    description: "Deprecated German backend compatibility field. Prefer `German Health Extra Contribution %`. If used, enter literal percent points such as `2.5` for 2.5%, not `25`, `250`, basis points, or cents.",
+    countries: ["DE"],
   },
   {
     prop: "kirche",
@@ -69,15 +114,25 @@ const PERSON_ADVANCED_FIELDS = [
     prop: "gesetzlicheRv",
     apiKey: "gesetzliche_RV",
     type: "integer",
-    label: "Gesetzliche RV",
-    description: "Raw Obolus API field `gesetzliche_RV`, typically `1` or `0` depending on pension insurance status.",
+    label: "Legacy Gesetzliche RV",
+    description: "Deprecated German backend compatibility field. Prefer `German Pension Insurance`. In this legacy field `0` means standard statutory pension/unemployment applies; `1` disables statutory pension/unemployment handling for exempt cases. Do not use `1` to mean yes/statutory.",
+    countries: ["DE"],
   },
   {
     prop: "gesetzlicheKvpvStatus",
     apiKey: "gesetzlicheKvPvStatus",
     type: "integer",
-    label: "Gesetzliche KV/PV Status",
-    description: "Raw Obolus API field `gesetzlicheKvPvStatus` for German statutory health / care insurance mode.",
+    label: "Legacy Gesetzliche KV/PV Status",
+    description: "Deprecated German backend compatibility field. Prefer `German Health Insurance`. In this legacy field `0` means statutory GKV/PV for a standard employee; `1` means private health insurance. Do not use `1` to mean yes/statutory.",
+    countries: ["DE"],
+  },
+  {
+    prop: "kvArt",
+    apiKey: "KV_Art",
+    type: "integer",
+    label: "Legacy KV Art",
+    description: "Deprecated German backend compatibility field. Prefer `German Health Insurance`. Use `0` for statutory GKV and `1` only for private PKV; it should agree with `gesetzlicheKvPvStatus`.",
+    countries: ["DE"],
   },
   {
     prop: "pendlerKm",
@@ -99,20 +154,38 @@ function buildAdvancedPropName(prefix, prop) {
   return `${prefix}${prop.charAt(0).toUpperCase()}${prop.slice(1)}`;
 }
 
-function buildPersonAdvancedProps(prefix, labelPrefix) {
-  return PERSON_ADVANCED_FIELDS.reduce((props, field) => ({
+function fieldAppliesToCountry(field, country) {
+  return !field.countries || field.countries.includes(country);
+}
+
+function buildPersonAdvancedProps(prefix, labelPrefix, country) {
+  return PERSON_ADVANCED_FIELDS
+    .filter((field) => fieldAppliesToCountry(field, country))
+    .reduce((props, field) => ({
     ...props,
     [buildAdvancedPropName(prefix, field.prop)]: {
       type: field.type,
       label: `${labelPrefix} ${field.label}`,
       description: field.description,
+      ...(field.options
+        ? {
+          options: field.options,
+        }
+        : {}),
+      ...(field.default !== undefined
+        ? {
+          default: field.default,
+        }
+        : {}),
       optional: true,
     },
   }), {});
 }
 
 function buildPersonAdvancedOverrides(ctx, prefix) {
-  return PERSON_ADVANCED_FIELDS.reduce((overrides, field) => {
+  return PERSON_ADVANCED_FIELDS
+    .filter((field) => fieldAppliesToCountry(field, ctx.country))
+    .reduce((overrides, field) => {
     const value = ctx[buildAdvancedPropName(prefix, field.prop)];
     if (value !== undefined && value !== null && value !== "") {
       overrides[field.apiKey] = value;
@@ -140,10 +213,50 @@ function toMinorUnits(value, label, { optional = false } = {}) {
   return Math.round(value * 100);
 }
 
+function toPayrollPeriodMinorUnits(value, label, payrollPeriod, { optional = false } = {}) {
+  const annualMinorUnits = toMinorUnits(value, label, {
+    optional,
+  });
+
+  if (annualMinorUnits === undefined) {
+    return undefined;
+  }
+
+  const periodDivisors = {
+    1: 1,
+    2: 12,
+    3: 52,
+    4: 260,
+  };
+  const divisor = periodDivisors[Number(payrollPeriod)];
+
+  if (!divisor) {
+    throw new ConfigurationError("Payroll Period must be one of 1=year, 2=month, 3=week, or 4=day.");
+  }
+
+  return Math.round(annualMinorUnits / divisor);
+}
+
 function setIfDefined(target, key, value) {
   if (value !== undefined && value !== null && value !== "") {
     target[key] = value;
   }
+}
+
+function getGermanStandardEmployeeDefaults(country) {
+  if (country !== "DE") {
+    return {};
+  }
+
+  return {
+    standard_german_employee: true,
+    de_pension_insurance: "statutory",
+    de_health_insurance: "statutory",
+    de_health_extra_contribution_percent: 2.5,
+    Kirche: 0,
+    KinderPVA: 0,
+    Kinderfreibetrag: 0,
+  };
 }
 
 export default {
@@ -188,7 +301,7 @@ export default {
     payrollPeriod: {
       type: "integer",
       label: "Payroll Period",
-      description: "Top-level LZZ value. Commonly 1=year, 2=month, 3=week depending on country logic.",
+      description: "Top-level LZZ value. 1=year, 2=month, 3=week, 4=day. Direct salary inputs are annual gross amounts; this action converts them to the selected payroll period before calling Obolus.",
       default: 1,
     },
     grossAnnual: {
@@ -283,7 +396,7 @@ export default {
       person1Overrides: {
         type: "string",
         label: "Person 1 JSON Overrides",
-        description: "Optional JSON object merged into person 1 for edge cases and forward compatibility. Example: {\"Kirche\":1,\"KVZ\":2.9}",
+        description: "Optional JSON object merged into person 1 for edge cases and forward compatibility. Prefer readable German aliases, e.g. {\"de_health_extra_contribution_percent\":2.9,\"de_health_insurance\":\"statutory\"}.",
         optional: true,
       },
       requestOverrides: {
@@ -292,18 +405,18 @@ export default {
         description: "Optional JSON object merged into the top-level berechne payload. Do not include `Personen`. Example: {\"Faktor\":0.95,\"KinderFRB\":1}",
         optional: true,
       },
-      ...buildPersonAdvancedProps("person1", "Person 1"),
+      ...buildPersonAdvancedProps("person1", "Person 1", this.country),
     });
 
     if (this.includeSecondPerson) {
       props.person2Overrides = {
         type: "string",
         label: "Person 2 JSON Overrides",
-        description: "Optional JSON object merged into person 2 for edge cases and forward compatibility. Example: {\"Kirche\":0,\"KinderPVA\":2}",
+        description: "Optional JSON object merged into person 2 for edge cases and forward compatibility. Prefer readable German aliases, e.g. {\"de_pension_insurance\":\"statutory\",\"de_health_insurance\":\"statutory\"}.",
         optional: true,
       };
 
-      Object.assign(props, buildPersonAdvancedProps("person2", "Person 2"));
+      Object.assign(props, buildPersonAdvancedProps("person2", "Person 2", this.country));
     }
 
     return props;
@@ -325,8 +438,9 @@ export default {
       throw new ConfigurationError("Top-Level JSON Overrides must not include Personen or Modus. Use the person override fields instead.");
     }
 
-    const person1GrossMinor = toMinorUnits(this.grossAnnual, "Person 1 Annual Gross Salary");
+    const person1GrossMinor = toPayrollPeriodMinorUnits(this.grossAnnual, "Person 1 Annual Gross Salary", this.payrollPeriod);
     const person1 = {
+      ...getGermanStandardEmployeeDefaults(this.country),
       ...person1Overrides,
       Land: this.country,
       Gehalt_ct: person1GrossMinor,
@@ -340,10 +454,11 @@ export default {
     ];
 
     if (this.includeSecondPerson) {
-      const person2GrossMinor = toMinorUnits(this.secondGrossAnnual, "Person 2 Annual Gross Salary", {
+      const person2GrossMinor = toPayrollPeriodMinorUnits(this.secondGrossAnnual, "Person 2 Annual Gross Salary", this.payrollPeriod, {
         optional: true,
       });
       const person2 = {
+        ...getGermanStandardEmployeeDefaults(this.country),
         ...person2Overrides,
         Land: this.country,
       };
